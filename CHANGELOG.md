@@ -3,6 +3,27 @@
 All notable changes to **video-autopilot-kit** are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.4.0] — 2026-06-23
+
+**Knowledge base drop.** The kit used to ship the *tools* (`src/` helpers) but not the
+*know-how*. This release adds a `knowledge/` folder — 20 markdown docs distilling the
+methodology behind the tools, with all personal data stripped (creator identity, community,
+channel stats, real video titles/addresses, personal script voice → all removed). MIT.
+
+### Added — `knowledge/`
+- **`meta-lessons.md`** — M1–M99 "every mistake + permanent fix" canon (look-before-caption,
+  no-fabrication, chrome/privacy leaks, image framing, strobing, dead-air, Shorts BGM
+  highlight, loudness-swing compression, "self-tests that mock the external tool ship bugs"…).
+- **YouTube algorithm** — overview, deep mastery (MrBeast tactics + retention engineering),
+  2026 insights, teaching-niche playbook, launch-hype/community-mobilization SOP.
+- **Cross-platform craft** — craft overview, playbook, IG caption patterns, viral-short
+  structure, 2026 Shorts/Reels best practices.
+- **CapCut automation SOP** — agent-ops SOP, brief template, text-template catalog, draft-JSON
+  direct editing, Pro paywall map, pure-ffmpeg build pipeline, agent token-efficiency.
+- **Script** — a framework for learning *your own* script style (you fill your own profile).
+
+> Sanitized via a 20-agent parallel pass + a mechanical leak gate (grep) over the whole folder.
+
 ## [0.3.3] — 2026-06-23
 
 Music intelligence for vertical Shorts — auto-pick the right track, start it at the

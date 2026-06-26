@@ -3,6 +3,27 @@
 All notable changes to **video-autopilot-kit** are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.6.0] — 2026-06-27
+
+**Pro audio chain + narration-speed timeline sync** (knowledge + technique; the biggest audio-quality jump in the kit so far). Motivated by "the editing sounds amateur" + "you talk too slow" feedback — the fix is the audio, not the picture.
+
+### Added
+- `knowledge/meta-lessons.md`: **M103** — making teaching long-form narration sound *pro*:
+  **acompressor** to flatten loud/soft swings (a real compressor, not a normalizer — the #1 amateur
+  tell), **sidechain-ducked BGM** (voice as the key → music auto-ducks when you speak, floats back in
+  the gaps; replaces a static `volume=` duck), **two-pass loudnorm** (`print_format=json` measure →
+  `measured_*`+`linear=true` apply, for accurate −14 LUFS without pumping), and a continuous pink
+  **room-tone bed** so the gaps aren't dead digital silence. Plus the **atempo speed-sync rule**: a
+  single `speed` constant must flow through audio/visual/captions (write it to `offsets['_speed']`,
+  consume as `/SP` downstream) or the timeline desyncs; and **tail-length alignment** (fade BGM/mix to
+  the *actual video length*, not audio length, so `-shortest` doesn't hard-cut the BGM at ~−23 dB =
+  outro click). Closes with **automated delivery gates** (M97): assert LUFS −14±1 / tail RMS<−40 dB /
+  audio-vs-video stream |Δ|<0.4 s / last-caption-end ≤ duration — and extracting the chain into a
+  reusable, ffmpeg-self-tested helper instead of copy-pasting it into every build script.
+- `knowledge/programmatic-video-build.md`: §7 now shows the **pro mix** (voice acompressor +
+  sidechain duck + two-pass loudnorm + tail-align) alongside the basic mix; §8 QA adds the
+  `audio=True` / `ass=` gate call.
+
 ## [0.5.1] — 2026-06-25
 
 **Two new field-lessons from a teaching long-form rebuild** (knowledge-only; no code change).

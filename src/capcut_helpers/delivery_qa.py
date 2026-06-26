@@ -170,10 +170,85 @@ def contact_sheet(video, out_png, every=6.0, cols=6, cell_w=440, cell_h=248):
             pass
     return out_png
 
+# ---------------------------------------------------------------- 🎚️ 音訊 QA gates (M103)
+# 把教學長片音訊失敗模式固化成自動 gate：
+#   LUFS 偏離 / outro BGM 硬切 / A/V 尾長不符(-shortest 砍音訊) / 字幕溢出片長。
+def _loudnorm_measure(media):
+    """loudnorm 量測模式抓 input_i(LUFS) / input_tp(dBTP)。回 (lufs, tp)，抓不到回 (None,None)。"""
+    r = _run(['ffmpeg', '-hide_banner', '-i', media,
+              '-af', 'loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json', '-f', 'null', '-'])
+    mi = re.search(r'"input_i"\s*:\s*"([-\d.]+)"', r.stderr)
+    mt = re.search(r'"input_tp"\s*:\s*"([-\d.]+)"', r.stderr)
+    return (float(mi.group(1)) if mi else None, float(mt.group(1)) if mt else None)
+
+
+def check_loudness(video, target_i=-14.0, tol=1.0, max_tp=-1.0):
+    """M103 gate：成片響度落在 target±tol LUFS 且 true-peak ≤ max_tp dBTP。
+    把『只 print 不 assert』升級成自動 flag → 偏離不 green 不交付。"""
+    lufs, tp = _loudnorm_measure(video)
+    ok = (lufs is not None and abs(lufs - target_i) <= tol
+          and tp is not None and tp <= max_tp + 0.3)   # TP 留 0.3dB 量測/loudnorm 邊界誤差
+    return {'lufs': lufs, 'tp': tp, 'target': target_i, 'ok': bool(ok),
+            'note': f'LUFS {lufs} (要 {target_i}+-{tol}) / TP {tp} (要 <={max_tp})'}
+
+
+def check_tail_silence(video, tail=0.25, max_rms_db=-40.0):
+    """M103 gate：成片尾段已淡到近靜音 (各聲道 RMS < max_rms_db)。
+    防 -shortest 砍 BGM 在 ~-23dB 硬切 = outro click。"""
+    r = _run(['ffmpeg', '-hide_banner', '-sseof', f'-{tail}', '-i', video,
+              '-af', 'astats=metadata=1:reset=1', '-f', 'null', '-'])
+    rms = [float(m.group(1)) for m in re.finditer(r'RMS level dB:\s*([-\d.]+)', r.stderr)]
+    tail_rms = max(rms) if rms else 0.0   # 取最大聲道 = 最保守
+    return {'tail_rms_db': round(tail_rms, 1), 'max_allowed': max_rms_db, 'ok': tail_rms < max_rms_db,
+            'note': f'尾 {tail}s RMS {round(tail_rms,1)}dB (要 <{max_rms_db}=已淡到靜音)'}
+
+
+def _stream_dur(media, kind):
+    r = _run(['ffprobe', '-v', 'error', '-select_streams', f'{kind}:0',
+              '-show_entries', 'stream=duration', '-of', 'csv=p=0', media])
+    try:
+        return float(r.stdout.strip())
+    except (ValueError, AttributeError):
+        return None
+
+
+def check_av_sync(video, tol=0.4):
+    """M103 gate：audio 與 video stream 時長一致 (|Δ|<tol)。
+    防 -shortest 砍掉較長軌 = 靜默資料遺失，AP12 只驗 mux 前、碰不到成片。"""
+    a, v = _stream_dur(video, 'a'), _stream_dur(video, 'v')
+    diff = abs(a - v) if (a and v) else None
+    return {'audio_dur': a, 'video_dur': v, 'diff': round(diff, 3) if diff is not None else None,
+            'ok': diff is not None and diff < tol,
+            'note': f'A {a} vs V {v} delta {round(diff,3) if diff is not None else "?"}s (要 <{tol})'}
+
+
+def _ass_last_end(ass_path):
+    """parse ASS Dialogue 行的 End 時間戳 (H:MM:SS.cc) → 最大 end 秒。"""
+    mx = 0.0
+    with open(ass_path, encoding='utf-8') as fh:
+        for ln in fh:
+            if not ln.startswith('Dialogue:'):
+                continue
+            parts = ln.split(',')
+            if len(parts) >= 3:
+                m = re.match(r'(\d+):(\d\d):(\d\d(?:\.\d+)?)', parts[2].strip())
+                if m:
+                    mx = max(mx, int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)))
+    return mx
+
+
+def check_captions_within_dur(ass_path, video_dur, slack=0.1):
+    """M103 gate：字幕末端 end 不溢出影片長 (max_end <= video_dur+slack)。"""
+    last = _ass_last_end(ass_path)
+    return {'last_caption_end': round(last, 2), 'video_dur': round(video_dur, 2),
+            'ok': last <= video_dur + slack,
+            'note': f'末字幕 {round(last,2)}s vs 片長 {round(video_dur,2)}s (要 <=+{slack})'}
+
+
 # ---------------------------------------------------------------- 🚦 QA 主入口
-def final_delivery_qa(video, voice=None, contact_out=None):
-    """🚦 交付前 QA（canon M91-M95 + QA 清單）。回 dict + 印報告。
-    機械項：M93 頻閃、M95 死空檔。人工項：看接觸表逐格確認 M91/M92/M94/M68。"""
+def final_delivery_qa(video, voice=None, contact_out=None, audio=False, ass=None):
+    """🚦 交付前 QA（canon M91-M95 + M103 音訊 gate + QA 清單）。回 dict + 印報告。
+    機械項：M93 頻閃、M95 死空檔、M103(audio=True)LUFS/尾靜音/A-V同步/字幕溢出。人工項：看接觸表確認 M91/M92/M94/M68。"""
     rep = {'video': str(video), 'duration': round(_probe_dur(video), 2)}
     flashes = detect_flash(video)
     rep['flash_segments'] = flashes
@@ -186,18 +261,37 @@ def final_delivery_qa(video, voice=None, contact_out=None):
     if voice:
         rep['long_pauses'] = detect_long_pauses(voice)
         rep['deadair_flag'] = len(rep['long_pauses']) > 0
+    if audio:   # M103 音訊 gate（教學長片成片 = 跑這組；純 silent vlog 可略）
+        rep['loudness'] = check_loudness(video)
+        rep['tail_silence'] = check_tail_silence(video)
+        rep['av_sync'] = check_av_sync(video)
+        rep['audio_ok'] = rep['loudness']['ok'] and rep['tail_silence']['ok'] and rep['av_sync']['ok']
+    if ass:
+        rep['captions'] = check_captions_within_dur(ass, rep['duration'])
     if contact_out:
         contact_sheet(video, contact_out)
         rep['contact_sheet'] = str(contact_out)
 
     # cp950 console 不能印 emoji → runtime 輸出一律 ASCII marker（canon 文件才用 emoji）
+    def _mk(ok): return '[OK] ' if ok else '[WARN] '
     print(f"[QA] final_delivery_qa: {rep['video']} | {rep['duration']}s")
     print('  M93 flash :', '[WARN] suspect flash ' + str(flashes) if rep['flash_flag'] else '[OK] none')
     print('  M92 border:', '[WARN] ' + borders['note'] if rep['border_flag'] else '[OK] 滿版無黑邊')
     if voice:
         print('  M95 deadair(>1.5s):', '[WARN] ' + str(rep['long_pauses']) if rep['deadair_flag'] else '[OK] none')
+    if audio:
+        print('  M103 loudness:', _mk(rep['loudness']['ok']) + rep['loudness']['note'])
+        print('  M103 tail    :', _mk(rep['tail_silence']['ok']) + rep['tail_silence']['note'])
+        print('  M103 av-sync :', _mk(rep['av_sync']['ok']) + rep['av_sync']['note'])
+    if ass:
+        print('  M103 caption :', _mk(rep['captions']['ok']) + rep['captions']['note'])
     if contact_out:
         print('  contact_sheet ->', contact_out)
+    rep['deliver_ok'] = not (rep['flash_flag'] or rep['border_flag']
+                             or rep.get('deadair_flag', False)
+                             or (audio and not rep['audio_ok'])
+                             or (ass and not rep['captions']['ok']))
+    print('  [GATE]', 'DELIVER OK (機械項全綠)' if rep['deliver_ok'] else 'BLOCKED — 修正上面 [WARN] 再交付')
     print('  Note: 人工逐格看接觸表 — M91 chrome/隱私 / M92 圖片排版 / M94 真實 artifact / M68 字幕(逗號/停頓/對位)')
     return rep
 
@@ -221,6 +315,17 @@ if __name__ == "__main__":
     assert cp and cp[-1] == ('1920', '1036', '0', '22'), "cropdetect 解析漏判"
     _cw, _ch = 1920, 1036
     assert (1920 - _cw) <= 4 and (1080 - _ch) > 4, "死黑邊 threshold 邏輯錯（高度該判有黑邊）"
-    # _probe_wh 解析：對 ffprobe csv 尾端多餘分隔符 + CRLF 免疫（不 split('x')）— 2026-06-22 踩過
+    # _probe_wh 解析：對 ffprobe csv 尾端多餘分隔符 + CRLF 免疫（不 split('x')）
     assert [int(x) for x in _re.findall(r'\d+', "1080x1920x\r")][:2] == [1080, 1920], "_probe_wh 尾端分隔解析漏判"
+    # ── M103 音訊 gate parser regression（純字串，真 ffmpeg 跑在 final_delivery_qa(audio=True)）──
+    li = _re.search(r'"input_i"\s*:\s*"([-\d.]+)"', 'x "input_i" : "-14.07",\n "input_tp" : "-1.33"')
+    lt = _re.search(r'"input_tp"\s*:\s*"([-\d.]+)"', '"input_tp" : "-1.33"')
+    assert li and float(li.group(1)) == -14.07 and lt and float(lt.group(1)) == -1.33, "loudnorm json parse 漏判"
+    rms = [float(m.group(1)) for m in _re.finditer(r'RMS level dB:\s*([-\d.]+)', "RMS level dB: -49.66\nRMS level dB: -49.70")]
+    assert rms == [-49.66, -49.70] and max(rms) < -40, "astats RMS parse / tail gate 邏輯漏判"
+    assert abs(-14.07 - (-14.0)) <= 1.0 and (-1.33) <= (-1.0) + 0.3, "loudness gate 該 PASS(-14.07/-1.33)"
+    assert not (abs(-11.5 - (-14.0)) <= 1.0), "loudness gate 該 BLOCK(-11.5 偏離 -14)"
+    _m = _re.match(r'(\d+):(\d\d):(\d\d(?:\.\d+)?)', "0:01:23.45")
+    assert _m and int(_m.group(1)) * 3600 + int(_m.group(2)) * 60 + float(_m.group(3)) == 83.45, "ASS 末時間戳解析漏判"
+    assert 83.45 <= 83.60 + 0.1, "caption-within-dur gate 該 PASS(末字幕<=片長+slack)"
     print("[delivery_qa selftest] OK")
